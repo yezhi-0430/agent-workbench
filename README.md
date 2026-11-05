@@ -1,66 +1,177 @@
 # Agent Workbench
 
-基于 Python 标准库、SQLite 和 OpenRouter 的最小 Agent。主循环、工具注册及 session 管理自行实现，没有使用 Agent 框架。
+一个从零实现的最小 Agent Runtime，使用 OpenRouter 的真实大模型 API，通过网页展示对话、工具调用与执行记录。项目不依赖 LangGraph、OpenHands 等 Agent 框架；模型调用、工具注册、执行循环、会话隔离和上下文管理均由项目自行实现。
 
-## 启动
+![Agent Workbench 首页](docs/images/workbench.jpg)
 
-要求 Python 3.10+，无需安装依赖。PowerShell：
+> 截图为真实运行的工作台首页。左侧是会话列表，中间是聊天区，右侧显示执行记录。
+
+## 功能概览
+
+- **Agent 循环**：模型基于工具 Schema 选择直接回答或调用工具；Runtime 执行工具后回填结果，继续调用模型，直到输出答案或达到单次运行的 8 轮上限。
+- **工具注册**：统一注册名称、描述、参数 Schema 和执行函数；执行前检查必填字段、基本类型、枚举和多余字段。
+- **三个工具**：`calculator` 使用 AST 白名单计算表达式；`search` 返回明确标记的模拟结果；`todo` 支持新增、列出和完成当前会话的待办。
+- **会话隔离与恢复**：会话、消息、摘要、待办与执行记录保存在 SQLite；可切换会话，关闭页面或重启后重新选择会话继续聊天。
+- **上下文管理**：近期对话保留原文，较早的完整轮次分片生成增量摘要；压缩失败时保留原始历史并停止本次请求。
+- **可观察性**：按 `run_id` 记录模型调用、工具输入输出、耗时、重试次数、压缩与错误事件，前端提供展开查看。
+- **基础恢复**：支持取消信号、网络有限重试和中断工具调用的历史修复；不会自动重新执行结果未知的工具。
+
+## 快速开始
+
+### 环境要求
+
+- Python **3.10+**。项目运行时仅使用 Python 标准库，无需安装第三方 Python 依赖。
+- OpenRouter API Key，以及一个支持工具调用的模型。
+- 首次调用模型需要可连接 OpenRouter 的网络；API 调用可能产生费用。
+
+### 1. 获取项目
+
+```bash
+git clone https://github.com/yezhi-0430/agent-workbench.git
+cd agent-workbench
+```
+
+### 2. 配置环境变量
+
+Windows PowerShell：
 
 ```powershell
-$env:OPENROUTER_API_KEY = '你的密钥'
-$env:OPENROUTER_MODEL = 'openai/gpt-4o-mini'
+Copy-Item .env.example .env
+```
+
+macOS / Linux：
+
+```bash
+cp .env.example .env
+```
+
+编辑 `.env`：
+
+```dotenv
+OPENROUTER_API_KEY=填写你的密钥
+OPENROUTER_MODEL=openai/gpt-4o-mini
+```
+
+模型可根据需要更换；应选择支持工具调用的模型。也可以直接设置同名系统环境变量，**已有环境变量优先于 `.env`**。请勿把真实密钥提交到仓库；`.env` 和 `agent.db` 已列入 `.gitignore`。
+
+### 3. 启动
+
+```bash
 python server.py
 ```
 
-打开 http://127.0.0.1:8765 。模型须支持工具调用；实际费用和可用性取决于 OpenRouter 账户。不要提交密钥。数据库 `agent.db` 保存在当前目录。
+打开 [http://127.0.0.1:8765](http://127.0.0.1:8765)。在终端按 `Ctrl+C` 停止服务。数据库默认保存在启动目录下的 `agent.db`。
 
-运行测试：`python -m unittest discover -s tests -v`。
+### 4. 运行测试
 
-## 设计
+```bash
+python -m unittest discover -s tests -v
+```
 
-浏览器通过 HTTP 使用 session API，聊天接口逐行推送 JSON 事件；每个 session 同时只允许一个运行。模型调用 OpenRouter 的 Chat Completions 接口，运行时解析工具调用、执行并把结果放回消息，直到得到答案或达到 8 轮上限。计算器用 AST 白名单解析，搜索是明确标注的 mock，todo 通过 SQLite 按 session 隔离。停止在当前阻塞模型请求返回后生效，网络请求超时 60 秒。
+自动化测试使用可控模型替身，不需要 API Key，也不会请求真实模型。
 
-## Memory 与 context
+## 界面演示
 
-消息和工具结果按 session 持久化；每次请求载入当前 session。运行时在超过 8 个用户轮次或近期消息超过约 22000 字符时压缩较早的完整轮次（字符数只是上下文大小的粗略估计，并不保证匹配任何模型的 token 窗口）。较早内容分片与已有摘要合并，全部成功后才保存摘要及覆盖位置；压缩失败会停止本次请求，保留原始历史并提示重试。超长单轮无法安全压缩时提示用户缩短输入或工具结果。摘要有损，可能遗漏或误记，并产生额外模型调用和费用。待办的权威状态在 SQLite 中，用户询问时由模型调用 todo 读取。无跨 session 召回或长期用户画像。模型不一定提供思维链，因此 trace 不依赖内部推理。
+1. 输入“我叫小林”，再问“我叫什么？”，检查连续对话。
+2. 输入“请计算 (128 + 56) × 3”，展开右侧 `calculator` 卡片，查看参数、结果与耗时。
+3. 输入“添加待办：准备周报”；新建另一个会话并查询待办，检查会话隔离，再切回原会话继续追问。
+4. 对话足够长时观察“上下文压缩”事件，再追问前文事实；摘要有损，结果需要实际核对。
 
-## 限制
+右侧事件会按单次运行分组。模型调用卡片展示模型名称、成功请求耗时和重试次数；工具卡片展示调用参数、结果和状态。历史记录保存在本地数据库，刷新后重新选择对应会话即可查看。
 
-这是仅绑定 localhost 的演示应用，无登录或多用户授权；不要暴露到公网。工具结果和对话存储在本地明文数据库。停止不立即中断正在进行的 HTTP 请求。搜索不是实时搜索。
+## 系统设计
 
-## 网络错误处理
+```mermaid
+flowchart LR
+    UI[Web 界面] --> API[HTTP 服务 / session]
+    API --> Runtime[Agent Runtime]
+    Runtime --> Context[上下文组装与压缩]
+    Context <--> DB[(SQLite)]
+    Runtime --> LLM[OpenRouter Chat Completions]
+    LLM -->|工具名称与参数| Registry[工具注册表]
+    Registry --> Calc[calculator]
+    Registry --> Search[search · mock]
+    Registry --> Todo[todo]
+    Todo <--> DB
+    Calc -->|工具结果| Runtime
+    Search -->|工具结果| Runtime
+    Todo -->|工具结果| Runtime
+    Runtime -->|模型 / 工具 / 结果事件| API
+    API -->|NDJSON| UI
+```
 
-对连接异常、超时及 HTTP 429/500/502/503/504 最多重试两次；认证等其他 HTTP 错误不会重试。普通对话记忆与待办任务通过系统提示和工具描述区分，模型仍可能偶尔误判。
+一次运行的流程：
 
-停止请求会在当前模型请求返回后检查；如果一组工具中还有未执行项，运行时记录取消结果，保持后续请求所需的工具调用与结果配对。当前模型请求本身不能立即中断。
+1. 用户提交消息；后端根据 `session_id` 读取历史并组装上下文。
+2. 将消息与注册工具的 Schema 发给模型，解析最终回答或 `tool_calls`。
+3. 对工具名称和参数做校验，执行工具并将结果以工具消息回填。
+4. 模型根据结果继续调用工具或返回答案；异常、取消或达到最大轮次时结束。
+5. 执行事件按会话与 `run_id` 持久化，并逐行推送至前端。
 
-工具通过 `Registry.register(schema, handler)` 注册，运行循环按名称分发；当前校验覆盖必填字段、额外字段、基本类型和枚举，并非完整 JSON Schema 实现。
+同一 session 同时只允许运行一个请求；不同 session 可分别处理。SQLite 访问通过锁串行化。同一 session 在忙碌时，新的聊天请求会收到 busy 响应，当前实现**不提供消息排队**。
 
-## 演示路径
+## Memory：召回时机与上下文放置
 
-1. 新建会话，输入“我叫小林”，然后问“我叫什么？”；观察普通记忆不会创建待办。
-2. 输入“添加待办：准备周报”，展开右侧 todo 卡片查看参数、结果和耗时。
-3. 新建另一个会话，输入“列出我的待办”，验证为空；切回第一个会话继续追问。
-4. 连续对话超过 8 个用户轮次，观察执行记录中的上下文压缩卡片，再追问较早的事实。摘要有损，结果须实际核对。
+当前 Memory 的范围是**单个 session 的历史消息、摘要和待办状态**；没有跨 session 的长期用户画像，也没有按语义检索旧消息。
 
-执行记录在运行时展示模型名称、成功请求的耗时与重试次数，以及工具调用状态和耗时；模型、工具、压缩和错误事件按会话保存，切换会话后恢复；旧会话没有新格式记录时从消息历史恢复工具记录。断线清理通过本地真实 TCP 断开测试，测试中的 Agent 使用可控替身。
+### 什么时候召回？
 
-进程在工具调用与结果之间退出时，下次请求会在发送给模型的历史中补充“执行结果未知”，不会自动重跑工具。原始记录不被改写；如果工具有副作用，应检查实际状态后再决定是否重试。
+- **每次用户发消息**：按 session ID 读取该会话历史及必要摘要，用于本轮回答和追问。
+- **需要待办状态时**：由模型选择 `todo` 工具，从数据库读取当前会话的最新状态。数据库是待办的权威来源。
+- **历史过长时**：超过 8 个用户轮次，或近期消息超过约 22,000 字符时，压缩较早的完整轮次。这里按字符估算，并非精确 token 计算。
 
-## 需求与验证对应
+### 放在什么位置？
 
-| 需求 | 自动化验证 | 真实服务验证 |
-| --- | --- | --- |
-| 工具注册、参数校验和循环上限 | `test_registry.py`、`test_agent.py` | OpenRouter 计算器调用 |
-| Session 持久化、隔离和并发 | `test_persistence.py`、`test_concurrency.py` | 两会话待办隔离 |
-| 对话追问与上下文压缩 | `test_persistence.py`、`test_summary.py`、`test_context_budget.py`、`test_tool_budget.py` | 构造长历史后召回早期代号；单次验证 |
-| 停止、断线和中断历史恢复 | `test_cancellation.py`、`test_disconnect.py`、`test_http_disconnect.py`、`test_recovery.py`、`test_crash_integration.py` | HTTP 断线及强制进程退出测试使用可控模型替身；尚未用真实模型做强制崩溃测试 |
-| Trace、重试与运行分组 | `test_resilience.py`、`test_trace_storage.py`、`test_trace_http.py`、`test_run_trace.py` | OpenRouter 模型和计算器事件 |
+发送给模型的内容通常按以下顺序组装：
 
-执行记录通过 `run_id`、UTC 时间、开始与结束事件区分各次运行；浏览器显示运行分隔。事件包含用户输入推导出的工具参数和结果，以明文保存在本地，请勿提交数据库。
+```text
+系统指令
+  → 旧对话摘要（仅已触发压缩时）
+  → 近期完整对话（包括工具调用与结果）
+  → 本次用户输入
+```
 
-项目结构：`agent.py` 负责模型接入、上下文和运行循环，`storage.py` 负责 SQLite，`tools.py` 负责工具和注册，`server.py` 负责 HTTP 与执行事件，`static/` 是浏览器界面。
+运行中，工具结果追加到当前消息序列，再发送给模型。压缩过程分片处理旧记录，并和已有摘要合并；全部成功后才更新摘要和覆盖位置。摘要过长或压缩失败时，本次请求停止，原始历史保留。
 
-每次模型请求之前也会检查消息总字符数；单轮内的工具结果导致超出预算时，停止运行并提示缩小查询，后续可继续对话触发旧轮次压缩。字符预算不包含完整工具 Schema、协议开销或供应商 token 计算，不构成模型窗口的硬保证。
+### 边界
 
-待办参数按操作校验：`add` 只接受非空 `text`，`list` 不接受额外参数，`complete` 需要正整数 `id`。摘要内容超出保存上限时会停止当前请求，不会静默截断摘要或推进覆盖位置。
+摘要可能遗漏或误记，生成摘要也会增加模型调用与费用。字符预算不含完整 Schema 和供应商协议开销，无法保证适配所有模型的上下文窗口；单轮内工具结果过长时会停止并提示缩小查询。原始历史会保留，但当前没有实现基于语义的原文自动回查。
+
+## 异常、取消与安全边界
+
+- 临时连接错误、超时和 HTTP 429/500/502/503/504 最多重试两次；认证错误等不会重试。
+- 取消信号会在运行流程检查时生效，**不能立刻中断正在进行的阻塞模型请求**。
+- 进程在工具调用与结果之间退出时，后续请求会对缺失结果补充“执行结果未知”，不会自动重跑有副作用的操作；仍需检查实际状态，当前没有通用幂等保证。
+- `search` 为模拟工具，不能提供实时搜索结果；工具参数校验实现的是基础 Schema 子集，不是完整 JSON Schema 校验器。
+- 事件流是逐条发送的 JSON 事件，**最终模型回答目前不是逐 token 流式输出**。没有专门解析和展示模型的内部推理字段。
+- 应用仅绑定本机回环地址，没有登录及多用户授权；对话与工具结果明文保存在本地，请勿将服务直接暴露到公网，也不要提交数据库。
+
+## 测试覆盖
+
+| 场景 | 相关测试 |
+| --- | --- |
+| Agent 循环、工具注册与校验 | `test_agent.py`、`test_registry.py`、`test_todo_validation.py` |
+| 会话隔离、持久化与并发 | `test_persistence.py`、`test_concurrency.py` |
+| 摘要、上下文预算与长工具结果 | `test_summary.py`、`test_summary_integrity.py`、`test_context_budget.py`、`test_tool_budget.py` |
+| 取消、断线与进程退出恢复 | `test_cancellation.py`、`test_http_disconnect.py`、`test_recovery.py`、`test_crash_integration.py` |
+| 重试、执行记录与运行分组 | `test_resilience.py`、`test_trace_storage.py`、`test_trace_http.py`、`test_run_trace.py` |
+
+真实 OpenRouter 曾用于验证对话追问、计算器、待办隔离和构造的长对话摘要；这些是特定场景下的验证，不代表所有模型和输入均有相同表现。断线与进程退出测试使用可控模型替身。
+
+## 项目结构
+
+```text
+agent-workbench/
+├── agent.py              # 模型请求、上下文和 Agent 主循环
+├── tools.py              # 工具定义、注册与参数校验
+├── storage.py            # SQLite 会话、消息、待办和事件存储
+├── server.py             # HTTP 接口、运行状态和事件推送
+├── config.py             # .env 配置加载
+├── static/               # 网页界面
+├── tests/                # 自动化测试
+├── docs/images/          # 工作台截图
+├── AI_NOTES.md           # AI 使用与问题解决记录
+└── .env.example          # 不含密钥的配置模板
+```
+
+AI 辅助开发过程及问题记录见 [AI_NOTES.md](AI_NOTES.md)。
